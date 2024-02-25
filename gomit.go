@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"runtime"
 )
 
 var ConfigPath string
@@ -39,6 +38,118 @@ func Contain(slice []string, value string) bool {
 	return false
 }
 
+func SetupConfig(args []string) {
+
+	// Write to ConfigPath
+	configString, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		log.Println("Config file not found, creating one")
+		config := make(map[string]string)
+		config[args[2]] = args[3]
+		configJson, _ := json.Marshal(config)
+		err = os.WriteFile(ConfigPath, configJson, 0644)
+		if err != nil {
+			log.Panic(err)
+		}
+		fmt.Printf("Set %s : %s to %s\n", args[2], args[3], ConfigPath)
+		os.Exit(1)
+
+	}
+
+	err = json.Unmarshal(configString, &Config)
+	if err != nil {
+		log.Panic(err)
+	}
+	Config[args[2]] = args[3]
+	configJson, _ := json.Marshal(Config)
+	err = os.WriteFile(ConfigPath, configJson, 0644)
+	if err != nil {
+		log.Panic(err)
+
+	}
+	newConfigString, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	fmt.Printf("Current config is %s\n", newConfigString)
+	os.Exit(1)
+}
+
+func SendDiffToGPT(diff []byte) Response {
+	data := Data{
+		Model: "gpt-3.5-turbo",
+		Messages: []Message{
+			{
+				Role: "system",
+				Content: "The input from user is the result of git diff" +
+					"You behave like commit generator, only give the commit result, nothing else\n" +
+					"Your response always include necessary information, nothing else, no need to give any personal response\n" +
+					"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
+					"After 2 new lines add long description with multi lines",
+			},
+			{
+				Role:    "user",
+				Content: string(diff),
+			},
+		},
+	}
+	body, err := json.Marshal(data)
+
+	req, err := http.NewRequest("POST",
+		Config["OPENAI_URL"],
+		bytes.NewBuffer(body),
+	)
+
+	if err != nil {
+		log.Panic(err)
+	}
+	req.Header.Add("Authorization", "Bearer "+Config["OPENAI_KEY"])
+	req.Header.Add("Content-Type", "application/json")
+	client := &http.Client{}
+	response, err := client.Do(req)
+	if err != nil {
+		log.Panic(err)
+	}
+	defer response.Body.Close()
+	var result Response
+	err = json.NewDecoder(response.Body).Decode(&result)
+	if err != nil {
+		log.Panic(err)
+	}
+	//fmt.Println(result)
+
+	return result
+}
+
+func ReadConfig() {
+	// read config
+	configString, err := os.ReadFile(ConfigPath)
+	if err != nil {
+		log.Panic(err)
+	}
+	err = json.Unmarshal(configString, &Config)
+	if err != nil {
+		log.Panic(err)
+	}
+
+}
+
+func HandleNonGitExist() {
+	_, err := exec.LookPath("git")
+	if err != nil {
+		log.Panic(err)
+	}
+
+	gitExist, err := os.Stat(".git")
+	if err != nil {
+		log.Panic(err)
+	}
+	if gitExist == nil {
+		log.Panic("No .git directory found")
+	}
+}
+
 func main() {
 	args := os.Args
 	help := `Usage:
@@ -56,125 +167,32 @@ OPENAI_URL - OpenAI API URL
 
 	}
 
-	goos := runtime.GOOS
-	if goos == "windows" {
-		log.Panic("Windows is not supported")
-
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		log.Panic(err)
 	}
-	if goos == "darwin" {
-		log.Panic("MacOS is not supported")
 
+	ConfigPath = path.Join(configDir, "gomit.json")
+
+	if len(args) == 4 && args[1] == "config" {
+		SetupConfig(args)
 	}
-	if goos == "linux" {
 
-		ConfigPath = path.Join(os.Getenv("HOME"), "/.config/gomit.json")
-		if len(args) == 4 && args[1] == "config" {
+	ReadConfig()
 
-			// Write to ConfigPath
-			configString, err := os.ReadFile(ConfigPath)
-			if err != nil {
-				log.Println("Config file not found, creating one")
-				config := make(map[string]string)
-				config[args[2]] = args[3]
-				configJson, _ := json.Marshal(config)
-				err = os.WriteFile(ConfigPath, configJson, 0644)
-				if err != nil {
-					log.Panic(err)
-				}
-				fmt.Printf("Set %s : %s to %s\n", args[2], args[3], ConfigPath)
-				os.Exit(1)
+	// handle non git exist
+	HandleNonGitExist()
 
-			}
-
-			err = json.Unmarshal(configString, &Config)
-			if err != nil {
-				log.Panic(err)
-			}
-			Config[args[2]] = args[3]
-			configJson, _ := json.Marshal(Config)
-			err = os.WriteFile(ConfigPath, configJson, 0644)
-			if err != nil {
-				log.Panic(err)
-
-			}
-			newConfigString, err := os.ReadFile(ConfigPath)
-			if err != nil {
-				log.Panic(err)
-			}
-
-			fmt.Printf("Current config is %s\n", newConfigString)
-			os.Exit(1)
-		}
-
-		configString, err := os.ReadFile(ConfigPath)
-		if err != nil {
-			log.Panic(err)
-		}
-		err = json.Unmarshal(configString, &Config)
-
-		_, err = exec.LookPath("git")
-		if err != nil {
-			log.Panic(err)
-		}
-
-		gitExist, err := os.Stat(".git")
-		if err != nil {
-			log.Panic(err)
-		}
-		if gitExist == nil {
-			log.Panic("No .git directory found")
-		}
-
-		diff, err := exec.Command("git", "--no-pager", "diff").Output()
-		if err != nil {
-			log.Panic(err)
-		}
-		if len(diff) == 0 {
-			log.Println("No changes to commit")
-			return
-		}
-		data := Data{
-			Model: "gpt-3.5-turbo",
-			Messages: []Message{
-				{
-					Role: "system",
-					Content: "The input from user is the result of git diff" +
-						"You behave like commit generator, only give the commit result, nothing else\n" +
-						"Your response always include necessary information, nothing else, no need to give any personal response\n" +
-						"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
-						"After 2 new lines add long description with multi lines",
-				},
-				{
-					Role:    "user",
-					Content: string(diff),
-				},
-			},
-		}
-		body, err := json.Marshal(data)
-
-		req, err := http.NewRequest("POST",
-			Config["OPENAI_URL"],
-			bytes.NewBuffer(body),
-		)
-
-		if err != nil {
-			log.Panic(err)
-		}
-		req.Header.Add("Authorization", "Bearer "+Config["OPENAI_KEY"])
-		req.Header.Add("Content-Type", "application/json")
-		client := &http.Client{}
-		response, err := client.Do(req)
-		if err != nil {
-			log.Panic(err)
-		}
-		defer response.Body.Close()
-		var result Response
-		err = json.NewDecoder(response.Body).Decode(&result)
-		if err != nil {
-			log.Panic(err)
-		}
-		//fmt.Println(result)
-		fmt.Println(result.Choices[0].Message.Content)
+	diff, err := exec.Command("git", "--no-pager", "diff").Output()
+	if err != nil {
+		log.Panic(err)
 	}
+	if len(diff) == 0 {
+		log.Println("No changes to commit")
+		return
+	}
+	result := SendDiffToGPT(diff)
+	//fmt.Println(result)
+	fmt.Println(result.Choices[0].Message.Content)
 
 }
