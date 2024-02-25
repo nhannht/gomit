@@ -41,7 +41,7 @@ func Contain(slice []string, value string) bool {
 
 func main() {
 	args := os.Args
-	help := `Usage: 
+	help := `Usage:
 gomit config [config_variable] [value] - Set a config variable
 gomit - Generate commit message of curent file
 gomit -h - Show this help
@@ -125,7 +125,7 @@ OPENAI_URL - OpenAI API URL
 			log.Panic("No .git directory found")
 		}
 
-		diff, err := exec.Command("git", "--no-pager", "diff", "--staged").Output()
+		diff, err := exec.Command("git", "--no-pager", "diff").Output()
 		if err != nil {
 			log.Panic(err)
 		}
@@ -138,7 +138,7 @@ OPENAI_URL - OpenAI API URL
 			Messages: []Message{
 				{
 					Role: "system",
-					Content: "The input from user is the result of git diff --staged" +
+					Content: "The input from user is the result of git diff" +
 						"You behave like commit generator, only give the commit result, nothing else\n" +
 						"Your response always include necessary information, nothing else, no need to give any personal response\n" +
 						"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
@@ -173,6 +173,7 @@ OPENAI_URL - OpenAI API URL
 		if err != nil {
 			log.Panic(err)
 		}
+		//fmt.Println(result)
 		fmt.Println(result.Choices[0].Message.Content)
 	}
 
