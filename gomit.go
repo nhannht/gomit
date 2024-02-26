@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"golang.design/x/clipboard"
 	"log"
 	"net/http"
 	"os"
@@ -38,20 +40,20 @@ func Contain(slice []string, value string) bool {
 	return false
 }
 
-func SetupConfig(args []string) {
+func SetupConfig(name string, value string) {
 
 	// Write to ConfigPath
 	configString, err := os.ReadFile(ConfigPath)
 	if err != nil {
 		log.Println("Config file not found, creating one")
 		config := make(map[string]string)
-		config[args[2]] = args[3]
+		config[name] = value
 		configJson, _ := json.Marshal(config)
 		err = os.WriteFile(ConfigPath, configJson, 0644)
 		if err != nil {
 			log.Panic(err)
 		}
-		fmt.Printf("Set %s : %s to %s\n", args[2], args[3], ConfigPath)
+		fmt.Printf("Set %s : %s to %s\n", name, value, ConfigPath)
 		os.Exit(1)
 
 	}
@@ -60,7 +62,7 @@ func SetupConfig(args []string) {
 	if err != nil {
 		log.Panic(err)
 	}
-	Config[args[2]] = args[3]
+	Config[name] = value
 	configJson, _ := json.Marshal(Config)
 	err = os.WriteFile(ConfigPath, configJson, 0644)
 	if err != nil {
@@ -93,6 +95,14 @@ func SendDiffToGPT(diff []byte) Response {
 				Content: string(diff),
 			},
 		},
+	}
+
+	if *staged {
+		data.Messages[0].Content = "The input from user is the result of git diff --staged, that mean this file already staged. \n" +
+			"You behave like commit generator, only give the commit result, nothing else\n" +
+			"Your response always include necessary information, nothing else, no need to give any personal response\n" +
+			"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
+			"After 2 new lines add long description with multi lines"
 	}
 	body, err := json.Marshal(data)
 
@@ -150,21 +160,50 @@ func HandleNonGitExist() {
 	}
 }
 
-func main() {
-	args := os.Args
-	help := `Usage:
-gomit config [config_variable] [value] - Set a config variable
-gomit - Generate commit message of curent file
+var (
+	help    = flag.Bool("h", false, "Show this help")
+	config  = flag.String("config", "", "Set a config variable")
+	value   = flag.String("value", "", "Set a config value")
+	commit  = flag.Bool("commit", false, "Generate commit message of current file")
+	gen     = flag.Bool("gen", false, "Generate commit message of current file")
+	staged  = flag.Bool("stage", false, "Just generate for staged file")
+	helpMsg = `Usage:
+gomit -config [config_variable] -value [value] - Set a config variable
+gomit -gen - Generate commit message of current stage of git project in current dir
+gomit -gen -stage - Just generate for staged file
+gomit -commit - Stage all files, open editor, copy the generated msg to clipboard
 gomit -h - Show this help
-environment variables:
-OPENAI_KEY - OpenAI API key
-OPENAI_URL - OpenAI API URL
-`
 
-	if Contain(args, "-h") {
-		log.Println(help)
+Config variables:
+OPENAI_KEY - OpenAI API key
+OPENAI_URL - OpenAI API URL`
+)
+
+func usage() {
+	flag.PrintDefaults()
+	_, err := fmt.Fprintf(os.Stderr, helpMsg)
+	if err != nil {
+		return
+	}
+	os.Exit(1)
+
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+	}
+	flag.Usage = usage
+	flag.Parse()
+	if *help {
+		fmt.Println(helpMsg)
 		os.Exit(1)
 
+	}
+
+	err := clipboard.Init()
+	if err != nil {
+		log.Panic(err)
 	}
 
 	configDir, err := os.UserConfigDir()
@@ -174,8 +213,8 @@ OPENAI_URL - OpenAI API URL
 
 	ConfigPath = path.Join(configDir, "gomit.json")
 
-	if len(args) == 4 && args[1] == "config" {
-		SetupConfig(args)
+	if *config != "" && *value != "" {
+		SetupConfig(*config, *value)
 	}
 
 	ReadConfig()
@@ -184,15 +223,54 @@ OPENAI_URL - OpenAI API URL
 	HandleNonGitExist()
 
 	diff, err := exec.Command("git", "--no-pager", "diff").Output()
+
 	if err != nil {
 		log.Panic(err)
+	}
+	if *staged {
+		diff, err = exec.Command("git", "--no-pager", "diff", "--staged").Output()
+		if err != nil {
+			log.Panic(err)
+		}
+
 	}
 	if len(diff) == 0 {
 		log.Println("No changes to commit")
 		return
 	}
 	result := SendDiffToGPT(diff)
-	//fmt.Println(result)
-	fmt.Println(result.Choices[0].Message.Content)
+
+	if *gen {
+		fmt.Println(result.Choices[0].Message.Content)
+		os.Exit(1)
+	}
+	clipboard.Write(clipboard.FmtText, []byte(result.Choices[0].Message.Content))
+
+	// copy the result to clipboard, run git commit and paste the result to editor
+	if *commit {
+		_, err = exec.Command("git", "add", ".").Output()
+		if err != nil {
+			log.Panic(err)
+
+		}
+		_, err = exec.Command("git", "commit").Output()
+		if err != nil {
+			log.Panic(err)
+		}
+		// paste the result to editor
+		b := clipboard.Read(clipboard.FmtText)
+		for len(b) > 0 {
+			n, err := os.Stdout.Write(b)
+			if err != nil {
+				log.Panic(err)
+
+			}
+			b = b[n:]
+		}
+
+		os.Exit(1)
+
+	}
+	usage()
 
 }
