@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/nhannht/gomit/function"
 	"golang.design/x/clipboard"
 	"log"
 	"net/http"
@@ -13,8 +15,29 @@ import (
 	"path"
 )
 
-var ConfigPath string
-var Config map[string]string
+var (
+	ConfigPath string
+	Config     map[string]string
+	help       = flag.Bool("h", false, "Show this help")
+	config     = flag.String("config", "", "Set a config variable")
+	value      = flag.String("value", "", "Set a config value")
+	commit     = flag.Bool("commit", false, "Generate commit message of current file")
+	gen        = flag.Bool("gen", false, "Generate commit message of current file")
+	staged     = flag.Bool("staged", false, "Just generate for staged file")
+	helpMsg    = `Usage:
+gomit -config [config_variable] -value [value] - Set a config variable
+gomit -gen - Generate commit message of current stage of git project in current dir
+gomit -gen -stage - Just generate for staged file
+gomit -commit - Stage all files, open editor, copy the generated msg to clipboard
+gomit -h - Show this help
+
+Config variables:
+OPENAI_KEY - OpenAI API key
+OPENAI_URL - OpenAI API URL`
+	result             Response
+	GlobalConversation []Message
+	scanner            = bufio.NewScanner(os.Stdin)
+)
 
 type Data struct {
 	Model    string    `json:"model"`
@@ -29,15 +52,6 @@ type Response struct {
 }
 type Choice struct {
 	Message Message `json:"message"`
-}
-
-func Contain(slice []string, value string) bool {
-	for _, item := range slice {
-		if item == value {
-			return true
-		}
-	}
-	return false
 }
 
 func SetupConfig(name string, value string) {
@@ -78,32 +92,15 @@ func SetupConfig(name string, value string) {
 	os.Exit(1)
 }
 
-func SendDiffToGPT(diff []byte) Response {
+func SendMessageToGPT(messages []Message) Response {
 	data := Data{
-		Model: "gpt-3.5-turbo",
-		Messages: []Message{
-			{
-				Role: "system",
-				Content: "The input from user is the result of git diff" +
-					"You behave like commit generator, only give the commit result, nothing else\n" +
-					"Your response always include necessary information, nothing else, no need to give any personal response\n" +
-					"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
-					"After 2 new lines add long description with multi lines",
-			},
-			{
-				Role:    "user",
-				Content: string(diff),
-			},
-		},
+		Model:    "gpt-3.5-turbo",
+		Messages: messages,
 	}
 
-	if *staged {
-		data.Messages[0].Content = "The input from user is the result of git diff --staged, that mean this file already staged. \n" +
-			"You behave like commit generator, only give the commit result, nothing else\n" +
-			"Your response always include necessary information, nothing else, no need to give any personal response\n" +
-			"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
-			"After 2 new lines add long description with multi lines"
-	}
+	//messagesJson, _ := json.MarshalIndent(messages, "", "  ")
+	//fmt.Println(string(messagesJson))
+
 	body, err := json.Marshal(data)
 
 	req, err := http.NewRequest("POST",
@@ -127,7 +124,12 @@ func SendDiffToGPT(diff []byte) Response {
 	if err != nil {
 		log.Panic(err)
 	}
-	//fmt.Println(result)
+
+	//clipboard.Write(clipboard.FmtText, []byte(result.Choices[0].Message.Content))
+	var message Message
+	message.Role = "assistant"
+	message.Content = result.Choices[0].Message.Content
+	GlobalConversation = append(GlobalConversation, message)
 
 	return result
 }
@@ -160,25 +162,6 @@ func HandleNonGitExist() {
 	}
 }
 
-var (
-	help    = flag.Bool("h", false, "Show this help")
-	config  = flag.String("config", "", "Set a config variable")
-	value   = flag.String("value", "", "Set a config value")
-	commit  = flag.Bool("commit", false, "Generate commit message of current file")
-	gen     = flag.Bool("gen", false, "Generate commit message of current file")
-	staged  = flag.Bool("stage", false, "Just generate for staged file")
-	helpMsg = `Usage:
-gomit -config [config_variable] -value [value] - Set a config variable
-gomit -gen - Generate commit message of current stage of git project in current dir
-gomit -gen -stage - Just generate for staged file
-gomit -commit - Stage all files, open editor, copy the generated msg to clipboard
-gomit -h - Show this help
-
-Config variables:
-OPENAI_KEY - OpenAI API key
-OPENAI_URL - OpenAI API URL`
-)
-
 func usage() {
 	flag.PrintDefaults()
 	_, err := fmt.Fprintf(os.Stderr, helpMsg)
@@ -193,13 +176,12 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
+	if *help {
+		usage()
+	}
+
 	flag.Usage = usage
 	flag.Parse()
-	if *help {
-		fmt.Println(helpMsg)
-		os.Exit(1)
-
-	}
 
 	err := clipboard.Init()
 	if err != nil {
@@ -221,33 +203,137 @@ func main() {
 
 	// handle non git exist
 	HandleNonGitExist()
+	var initMessage Message
+	initMessage.Role = "system"
 
-	diff, err := exec.Command("git", "--no-pager", "diff").Output()
+	if !*staged {
+		initMessage.Content = "The input from user are the description of all the change in current git project" +
+			"You behave like commit generator, only give the commit result, nothing else\n" +
+			"Your response always include necessary information, nothing else, no need to give any personal response\n" +
+			"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
+			"After 2 new lines add long description with multi lines"
 
-	if err != nil {
-		log.Panic(err)
+		GlobalConversation = append(GlobalConversation, initMessage)
+
+	} else {
+		initMessage.Content = "The input from user are the description of all the change in current git project, with staged file" +
+			"You behave like commit generator, only give the commit result, nothing else\n" +
+			"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
+			"After 2 new lines add long description with multi lines" +
+			"Your response always include necessary information, nothing else, no need to give any personal response\n"
+		GlobalConversation = append(GlobalConversation, initMessage)
 	}
+
+	var diff []byte
+	var diffMessage Message
+	diffMessage.Role = "user"
+
+	if !*staged {
+
+		diff, err = exec.Command("git", "--no-pager", "diff", "--minimal", "--no-color").Output()
+
+		if err != nil {
+			log.Panic(err)
+		}
+		diffMessage.Content = string(diff)
+
+	}
+
 	if *staged {
-		diff, err = exec.Command("git", "--no-pager", "diff", "--staged").Output()
+
+		diff, err = exec.Command("git", "--no-pager", "diff", "--minimal", "--no-color", "--staged").Output()
 		if err != nil {
 			log.Panic(err)
 		}
 
+		diffMessage.Content = string(diff)
+
 	}
+	diffFiles := function.ParseDiff(string(diff))
+
 	if len(diff) == 0 {
 		log.Println("No changes to commit")
 		return
 	}
-	result := SendDiffToGPT(diff)
 
 	if *gen {
-		fmt.Println(result.Choices[0].Message.Content)
+		var botDescription string
+		for _, file := range diffFiles.Files {
+			for _, hunk := range file.Hunks {
+				diffConversation := []Message{}
+				systemDiffMessage := Message{}
+				systemDiffMessage.Role = "system"
+				systemDiffMessage.Content = `User want to generate commit message for the following change.
+Remember that that is just a hunk of change of each file. You act like a commit generator.
+Only give the commit result, nothing else.
+Remember add file name at the start of each description.
+Because it is just a hunk, give a useful but short description.`
+				message := Message{}
+				message.Role = "user"
+				message.Content = fmt.Sprintf("File: %s\nOld start line: %d\nOld lines: %d\nNew start line: %d\nNew lines: %d\nContent: %s\n",
+					hunk.FileName, hunk.OldStartLine, hunk.OldLines, hunk.NewStartLine, hunk.NewLines, hunk.Content)
+				diffConversation = append(diffConversation, systemDiffMessage)
+				diffConversation = append(diffConversation, message)
+
+				result = SendMessageToGPT(diffConversation)
+				fmt.Println(result.Choices[0].Message.Content)
+				botDescription = botDescription + result.Choices[0].Message.Content + "\n"
+			}
+		}
+		GlobalConversation = append(GlobalConversation, Message{
+			Role:    "user",
+			Content: botDescription,
+		})
+
+		var result Response
+		for {
+			result = SendMessageToGPT(GlobalConversation)
+			fmt.Println(result.Choices[0].Message.Content)
+			var accept string
+			fmt.Println("Accept this commit message? (y/n)")
+			_, err = fmt.Scanln(&accept)
+			if err != nil {
+				log.Panic(err)
+			}
+			if accept == "y" {
+				clipboard.Write(clipboard.FmtText, []byte(result.Choices[0].Message.Content))
+				fmt.Println("The commit message has been copied to clipboard")
+				os.Exit(1)
+			} else {
+
+				var previousMessage Message
+				previousMessage.Role = "assistant"
+				previousMessage.Content = result.Choices[0].Message.Content
+				GlobalConversation = append(GlobalConversation, previousMessage)
+
+				fmt.Println("Please tell the bot what you want to be edit? Example: Please add the change of file README.md, etc...")
+
+				var edit string
+				for scanner.Scan() {
+					edit = scanner.Text()
+					break
+				}
+				var systemEditMessage Message
+				systemEditMessage.Role = "system"
+				systemEditMessage.Content = `User want to edit the message, he will put what he want in the following message, then the bot will generate the message again,
+The process will be repeated until the user accept the message`
+				GlobalConversation = append(GlobalConversation, systemEditMessage)
+
+				var editMessage Message
+				editMessage.Role = "user"
+				editMessage.Content = edit
+				GlobalConversation = append(GlobalConversation, editMessage)
+
+			}
+		}
+
 		os.Exit(1)
 	}
-	clipboard.Write(clipboard.FmtText, []byte(result.Choices[0].Message.Content))
 
 	// copy the result to clipboard, run git commit and paste the result to editor
 	if *commit {
+		result = SendMessageToGPT(GlobalConversation)
+
 		_, err = exec.Command("git", "add", ".").Output()
 		if err != nil {
 			log.Panic(err)
@@ -271,6 +357,5 @@ func main() {
 		os.Exit(1)
 
 	}
-	usage()
 
 }
