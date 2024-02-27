@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/atotto/clipboard"
 	"github.com/nhannht/gomit/function"
-	"golang.design/x/clipboard"
 	"log"
 	"net/http"
 	"os"
@@ -183,11 +183,6 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	err := clipboard.Init()
-	if err != nil {
-		log.Panic(err)
-	}
-
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		log.Panic(err)
@@ -220,7 +215,8 @@ func main() {
 			"You behave like commit generator, only give the commit result, nothing else\n" +
 			"Notice that the commit message should be short, in form of fix|feat|refactor|style|test|docs|chore: short description. " +
 			"After 2 new lines add long description with multi lines" +
-			"Your response always include necessary information, nothing else, no need to give any personal response\n"
+			"Your response always include necessary information, nothing else, no need to give any personal response\n" +
+			"You don't need to include the diff content in the commit."
 		GlobalConversation = append(GlobalConversation, initMessage)
 	}
 
@@ -235,7 +231,6 @@ func main() {
 		if err != nil {
 			log.Panic(err)
 		}
-		diffMessage.Content = string(diff)
 
 	}
 
@@ -246,10 +241,11 @@ func main() {
 			log.Panic(err)
 		}
 
-		diffMessage.Content = string(diff)
-
 	}
 	diffFiles := function.ParseDiff(string(diff))
+	diffMessageParse := function.TokenizeFileDiffToSuitableString(diffFiles, initMessage.Content)
+	diffMessage.Content = diffMessageParse
+	GlobalConversation = append(GlobalConversation, diffMessage)
 
 	if len(diff) == 0 {
 		log.Println("No changes to commit")
@@ -257,33 +253,6 @@ func main() {
 	}
 
 	if *gen {
-		var botDescription string
-		for _, file := range diffFiles.Files {
-			for _, hunk := range file.Hunks {
-				diffConversation := []Message{}
-				systemDiffMessage := Message{}
-				systemDiffMessage.Role = "system"
-				systemDiffMessage.Content = `User want to generate commit message for the following change.
-Remember that that is just a hunk of change of each file. You act like a commit generator.
-Only give the commit result, nothing else.
-Remember add file name at the start of each description.
-Because it is just a hunk, give a useful but short description.`
-				message := Message{}
-				message.Role = "user"
-				message.Content = fmt.Sprintf("File: %s\nOld start line: %d\nOld lines: %d\nNew start line: %d\nNew lines: %d\nContent: %s\n",
-					hunk.FileName, hunk.OldStartLine, hunk.OldLines, hunk.NewStartLine, hunk.NewLines, hunk.Content)
-				diffConversation = append(diffConversation, systemDiffMessage)
-				diffConversation = append(diffConversation, message)
-
-				result = SendMessageToGPT(diffConversation)
-				fmt.Println(result.Choices[0].Message.Content)
-				botDescription = botDescription + result.Choices[0].Message.Content + "\n"
-			}
-		}
-		GlobalConversation = append(GlobalConversation, Message{
-			Role:    "user",
-			Content: botDescription,
-		})
 
 		var result Response
 		for {
@@ -296,7 +265,7 @@ Because it is just a hunk, give a useful but short description.`
 				log.Panic(err)
 			}
 			if accept == "y" {
-				clipboard.Write(clipboard.FmtText, []byte(result.Choices[0].Message.Content))
+				clipboard.WriteAll(result.Choices[0].Message.Content)
 				fmt.Println("The commit message has been copied to clipboard")
 				os.Exit(1)
 			} else {
@@ -316,7 +285,7 @@ Because it is just a hunk, give a useful but short description.`
 				var systemEditMessage Message
 				systemEditMessage.Role = "system"
 				systemEditMessage.Content = `User want to edit the message, he will put what he want in the following message, then the bot will generate the message again,
-The process will be repeated until the user accept the message`
+	The process will be repeated until the user accept the message`
 				GlobalConversation = append(GlobalConversation, systemEditMessage)
 
 				var editMessage Message
@@ -344,15 +313,11 @@ The process will be repeated until the user accept the message`
 			log.Panic(err)
 		}
 		// paste the result to editor
-		b := clipboard.Read(clipboard.FmtText)
-		for len(b) > 0 {
-			n, err := os.Stdout.Write(b)
-			if err != nil {
-				log.Panic(err)
-
-			}
-			b = b[n:]
+		b, err := clipboard.ReadAll()
+		if err != nil {
+			log.Panic(err)
 		}
+		fmt.Println(string(b))
 
 		os.Exit(1)
 
